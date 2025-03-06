@@ -53,7 +53,7 @@ pub use tokio::{TokioChannelConsoleAccess};
 #[cfg(feature = "tokio")]
 mod tokio {
     use console::{Key, Term};
-    use tokio::sync::mpsc::Receiver;
+    use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
     use tokio::select;
     use crate::term_access::{TermAccess, InterruptableResult};
     use crate::term_access::InterruptableResult::{AccessRevoked, AsRequested, WriteLine};
@@ -61,7 +61,7 @@ mod tokio {
     pub struct TokioChannelConsoleAccess {
         pub term: Term,
         pub key_receiver: Receiver<Key>,
-        pub write_line_receiver: Receiver<String>
+        pub write_line_receiver: UnboundedReceiver<String>
     }
 
     impl TermAccess for TokioChannelConsoleAccess {
