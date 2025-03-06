@@ -199,16 +199,16 @@ impl Select<'_> {
     }
 
     #[inline]
-    pub async fn interact_on_async(self, mut term: &Term) -> Result<usize> {
+    pub async fn interact_on_async(self, term: &mut impl TermAccess) -> Result<usize> {
         Ok(self
-            ._interact_on_async(&mut term, false).await?
+            ._interact_on_async(term, false).await?
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Quit not allowed in this case"))?)
     }
 
     /// Like [`interact_opt`](Self::interact_opt) but allows a specific terminal to be set.
     #[inline]
-    pub async fn interact_on_opt_async(self, mut term: &Term) -> Result<Option<usize>> {
-        self._interact_on_async(&mut term, true).await
+    pub async fn interact_on_opt_async(self, term: &mut impl TermAccess) -> Result<Option<usize>> {
+        self._interact_on_async(term, true).await
     }
 
     /// Like `interact` but allows a specific terminal to be set.
