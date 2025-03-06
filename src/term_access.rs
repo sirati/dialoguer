@@ -47,6 +47,8 @@ impl TermAccess for &Term {
 }
 
 
+#[cfg(feature = "tokio")]
+pub use tokio::{TokioChannelConsoleAccess};
 
 #[cfg(feature = "tokio")]
 mod tokio {
@@ -56,7 +58,7 @@ mod tokio {
     use crate::term_access::{TermAccess, InterruptableResult};
     use crate::term_access::InterruptableResult::{AccessRevoked, AsRequested, WriteLine};
 
-    struct TokioChannelConsoleAccess {
+    pub struct TokioChannelConsoleAccess {
         pub term: Term,
         pub key_receiver: Receiver<Key>,
         pub write_line_receiver: Receiver<String>

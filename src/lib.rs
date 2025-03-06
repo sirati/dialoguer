@@ -63,4 +63,4 @@ mod paging;
 mod prompts;
 pub mod theme;
 mod validate;
-mod term_access;
+pub mod term_access;
