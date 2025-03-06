@@ -14,7 +14,7 @@ pub use colorful::ColorfulTheme;
 pub use simple::SimpleTheme;
 
 /// Implements a theme for dialoguer.
-pub trait Theme {
+pub trait Theme : Send{
     /// Formats a prompt.
     #[inline]
     fn format_prompt(&self, f: &mut dyn fmt::Write, prompt: &str) -> fmt::Result {
