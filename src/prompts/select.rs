@@ -1,11 +1,14 @@
 use std::{io, ops::Rem};
-
+use std::io::{Error, ErrorKind};
 use console::{Key, Term};
-
+use InterruptableResult::{AccessRevoked, AsRequested, IOError, WriteLine};
+use LoopStatement::Break;
 use crate::{
     theme::{render::TermThemeRenderer, SimpleTheme, Theme},
     Paging, Result,
 };
+use crate::prompts::select::LoopStatement::{Continue, Return};
+use crate::term_access::{InterruptableResult, TermAccess};
 
 /// Renders a select prompt.
 ///
@@ -51,6 +54,12 @@ impl Select<'static> {
     pub fn new() -> Self {
         Self::with_theme(&SimpleTheme)
     }
+}
+
+enum LoopStatement<T> {
+    Continue,
+    Break,
+    Return(T)
 }
 
 impl Select<'_> {
@@ -177,20 +186,182 @@ impl Select<'_> {
 
     /// Like [`interact`](Self::interact) but allows a specific terminal to be set.
     #[inline]
-    pub fn interact_on(self, term: &Term) -> Result<usize> {
+    pub fn interact_on(self, mut term: &Term) -> Result<usize> {
         Ok(self
-            ._interact_on(term, false)?
+            ._interact_on(&mut term, false)?
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Quit not allowed in this case"))?)
     }
 
     /// Like [`interact_opt`](Self::interact_opt) but allows a specific terminal to be set.
     #[inline]
-    pub fn interact_on_opt(self, term: &Term) -> Result<Option<usize>> {
-        self._interact_on(term, true)
+    pub fn interact_on_opt(self, mut term: &Term) -> Result<Option<usize>> {
+        self._interact_on(&mut term, true)
+    }
+
+    #[inline]
+    pub async fn interact_on_async(self, mut term: &Term) -> Result<usize> {
+        Ok(self
+            ._interact_on_async(&mut term, false).await?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Quit not allowed in this case"))?)
+    }
+
+    /// Like [`interact_opt`](Self::interact_opt) but allows a specific terminal to be set.
+    #[inline]
+    pub async fn interact_on_opt_async(self, mut term: &Term) -> Result<Option<usize>> {
+        self._interact_on_async(&mut term, true).await
     }
 
     /// Like `interact` but allows a specific terminal to be set.
-    fn _interact_on(self, term: &Term, allow_quit: bool) -> Result<Option<usize>> {
+    fn _interact_on(self, term_access: &mut impl TermAccess, allow_quit: bool) -> Result<Option<usize>> {
+        let term = &term_access.term();
+        let (mut paging, mut render, mut sel, size_vec) = self._interact_on_prepare(term)?;
+
+        loop {
+            self._interact_on_render(&mut paging, &mut render, sel)?;
+            term.flush()?;
+
+            let key = match term_access.read_key_blocking()  {
+                AsRequested(key) => key,
+                WriteLine(line) => {
+                    render.clear()?;
+                    term.write_line(&*line)?;
+                    continue
+                }
+                mut err => {
+                    err.try_into_error()?;
+                    continue
+                }
+            };
+            match self._interact_on_process_key(allow_quit, term, &mut paging, &mut render, &mut sel, &size_vec, key)? {
+                Continue => continue,
+                Break => break,
+                Return(res) => return Ok(res)
+            }
+        }
+        Err(Error::new(ErrorKind::Other, "Implementation mistake, should be unreachable").into())
+    }
+
+    async fn _interact_on_async(self, term_access: &mut impl TermAccess, allow_quit: bool) -> Result<Option<usize>> {
+        let term = &term_access.term();
+        let (mut paging, mut render, mut sel, size_vec) = self._interact_on_prepare(term)?;
+
+        loop {
+            self._interact_on_render(&mut paging, &mut render, sel)?;
+            term.flush()?;
+
+            let key = match term_access.read_key_async().await {
+                AsRequested(key) => key,
+                WriteLine(line) => {
+                    render.clear()?;
+                    term.write_line(&*line)?;
+                    continue
+                }
+                mut err => {
+                    err.try_into_error()?;
+                    continue
+                }
+            };
+            match self._interact_on_process_key(allow_quit, term, &mut paging, &mut render, &mut sel, &size_vec, key)? {
+                Continue => continue,
+                Break => break,
+                Return(res) => return Ok(res)
+            }
+        }
+        Err(Error::new(ErrorKind::Other, "Implementation mistake, should be unreachable").into())
+    }
+
+    #[inline]
+    fn _interact_on_process_key(&self, allow_quit: bool, term: &Term, paging: &mut Paging, render: &mut TermThemeRenderer, sel: &mut usize, size_vec: &Vec<usize>, key: Key) -> Result<LoopStatement<Option<usize>>>  {
+        match key {
+            Key::ArrowDown | Key::Tab | Key::Char('j') => {
+                if *sel == !0 {
+                    *sel = 0;
+                } else {
+                    *sel = (*sel as u64 + 1).rem(self.items.len() as u64) as usize;
+                }
+            }
+            Key::Escape | Key::Char('q') => {
+                if allow_quit {
+                    if self.clear {
+                        render.clear()?;
+                    } else {
+                        term.clear_last_lines(paging.capacity)?;
+                    }
+
+                    term.show_cursor()?;
+                    term.flush()?;
+
+                    return Ok(Return(None));
+                }
+            }
+            Key::ArrowUp | Key::BackTab | Key::Char('k') => {
+                if *sel == !0 {
+                    *sel = self.items.len() - 1;
+                } else {
+                    *sel = ((*sel as i64 - 1 + self.items.len() as i64)
+                        % (self.items.len() as i64)) as usize;
+                }
+            }
+            Key::ArrowLeft | Key::Char('h') => {
+                if paging.active {
+                    *sel = paging.previous_page();
+                }
+            }
+            Key::ArrowRight | Key::Char('l') => {
+                if paging.active {
+                    *sel = paging.next_page();
+                }
+            }
+
+            Key::Enter | Key::Char(' ') if *sel != !0 => {
+                if self.clear {
+                    render.clear()?;
+                }
+
+                if let Some(ref prompt) = self.prompt {
+                    if self.report {
+                        render.select_prompt_selection(prompt, &self.items[*sel])?;
+                    }
+                }
+
+                term.show_cursor()?;
+                term.flush()?;
+
+                return Ok(Return(Some(*sel)));
+            }
+            _ => {}
+        }
+
+        paging.update(*sel)?;
+
+        if paging.active {
+            render.clear()?;
+        } else {
+            render.clear_preserve_prompt(&size_vec)?;
+        }
+        Ok(Continue)
+    }
+
+    #[inline]
+    fn _interact_on_render(&self, paging: &mut Paging, render: &mut TermThemeRenderer, sel: usize) -> Result<()> {
+        if let Some(ref prompt) = self.prompt {
+            paging.render_prompt(|paging_info| render.select_prompt(prompt, paging_info))?;
+        }
+
+        for (idx, item) in self
+            .items
+            .iter()
+            .enumerate()
+            .skip(paging.current_page * paging.capacity)
+            .take(paging.capacity)
+        {
+            render.select_prompt_item(item, sel == idx)?;
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn _interact_on_prepare<'a>(&'a self, term: &'a Term) -> io::Result<(Paging<'a>, TermThemeRenderer<'a>, usize, Vec<usize>)> {
         if !term.is_term() {
             return Err(io::Error::new(io::ErrorKind::NotConnected, "not a terminal").into());
         }
@@ -220,92 +391,7 @@ impl Select<'_> {
 
         term.hide_cursor()?;
         paging.update_page(sel);
-
-        loop {
-            if let Some(ref prompt) = self.prompt {
-                paging.render_prompt(|paging_info| render.select_prompt(prompt, paging_info))?;
-            }
-
-            for (idx, item) in self
-                .items
-                .iter()
-                .enumerate()
-                .skip(paging.current_page * paging.capacity)
-                .take(paging.capacity)
-            {
-                render.select_prompt_item(item, sel == idx)?;
-            }
-
-            term.flush()?;
-
-            match term.read_key()? {
-                Key::ArrowDown | Key::Tab | Key::Char('j') => {
-                    if sel == !0 {
-                        sel = 0;
-                    } else {
-                        sel = (sel as u64 + 1).rem(self.items.len() as u64) as usize;
-                    }
-                }
-                Key::Escape | Key::Char('q') => {
-                    if allow_quit {
-                        if self.clear {
-                            render.clear()?;
-                        } else {
-                            term.clear_last_lines(paging.capacity)?;
-                        }
-
-                        term.show_cursor()?;
-                        term.flush()?;
-
-                        return Ok(None);
-                    }
-                }
-                Key::ArrowUp | Key::BackTab | Key::Char('k') => {
-                    if sel == !0 {
-                        sel = self.items.len() - 1;
-                    } else {
-                        sel = ((sel as i64 - 1 + self.items.len() as i64)
-                            % (self.items.len() as i64)) as usize;
-                    }
-                }
-                Key::ArrowLeft | Key::Char('h') => {
-                    if paging.active {
-                        sel = paging.previous_page();
-                    }
-                }
-                Key::ArrowRight | Key::Char('l') => {
-                    if paging.active {
-                        sel = paging.next_page();
-                    }
-                }
-
-                Key::Enter | Key::Char(' ') if sel != !0 => {
-                    if self.clear {
-                        render.clear()?;
-                    }
-
-                    if let Some(ref prompt) = self.prompt {
-                        if self.report {
-                            render.select_prompt_selection(prompt, &self.items[sel])?;
-                        }
-                    }
-
-                    term.show_cursor()?;
-                    term.flush()?;
-
-                    return Ok(Some(sel));
-                }
-                _ => {}
-            }
-
-            paging.update(sel)?;
-
-            if paging.active {
-                render.clear()?;
-            } else {
-                render.clear_preserve_prompt(&size_vec)?;
-            }
-        }
+        Ok((paging, render, sel, size_vec))
     }
 }
 
